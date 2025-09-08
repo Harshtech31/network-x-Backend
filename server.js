@@ -16,6 +16,8 @@ const projectRoutes = require('./src/routes/projects');
 const collaborationRoutes = require('./src/routes/collaborations');
 const messageRoutes = require('./src/routes/messages');
 const notificationRoutes = require('./src/routes/notifications');
+const searchRoutes = require('./src/routes/search');
+const feedRoutes = require('./src/routes/feed');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -63,6 +65,8 @@ app.use('/api/projects', projectRoutes);
 app.use('/api/collaborations', collaborationRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/search', searchRoutes);
+app.use('/api/feed', feedRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
