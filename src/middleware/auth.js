@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { User } = require('../models');
+const User = require('../models/mongodb/User');
 
 // Middleware to authenticate JWT tokens
 const authenticateToken = async (req, res, next) => {
@@ -17,9 +17,7 @@ const authenticateToken = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret');
     
     // Get user from database to ensure they still exist and are active
-    const user = await User.findByPk(decoded.userId, {
-      attributes: ['id', 'email', 'username', 'isActive', 'isVerified']
-    });
+    const user = await User.findById(decoded.userId).select('email username isActive isVerified');
 
     if (!user) {
       return res.status(401).json({
@@ -35,7 +33,7 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    req.user = user;
+    req.user = { id: user._id, email: user.email, username: user.username, isActive: user.isActive, isVerified: user.isVerified };
     req.startTime = Date.now(); // For performance monitoring
     next();
 
@@ -76,9 +74,7 @@ const requireVerification = (req, res, next) => {
 // Middleware to check admin privileges
 const requireAdmin = async (req, res, next) => {
   try {
-    const user = await User.findByPk(req.user.id, {
-      attributes: ['role']
-    });
+    const user = await User.findById(req.user.id).select('role');
 
     if (!user || user.role !== 'admin') {
       return res.status(403).json({

@@ -1,9 +1,9 @@
 const express = require('express');
-const { Op } = require('sequelize');
-const { User, Post, Project, Event, Club, Connection } = require('../models');
 const { authenticateToken } = require('../middleware/auth');
 const { query, validationResult } = require('express-validator');
-const cache = require('../utils/cache');
+const { scanItems } = require('../config/dynamodb');
+const { setCache, getCache } = require('../config/redis');
+const User = require('../models/mongodb/User');
 
 const router = express.Router();
 
@@ -74,136 +74,164 @@ const calculateRelevanceScore = (content, userInterests, userSkills, userConnect
 const getPersonalizedFeed = async (userId, type, page, limit) => {
   const offset = (page - 1) * limit;
   
-  // Get user profile and connections
-  const user = await User.findByPk(userId, {
-    attributes: ['interests', 'skills', 'department', 'year']
-  });
-  
-  const connections = await Connection.findAll({
-    where: {
-      [Op.or]: [
-        { requesterId: userId, status: 'accepted' },
-        { receiverId: userId, status: 'accepted' }
-      ]
-    },
-    attributes: ['requesterId', 'receiverId']
-  });
-  
-  const connectedUserIds = connections.map(conn => 
-    conn.requesterId === userId ? conn.receiverId : conn.requesterId
-  );
-  
+  // Get user data and connections
+  const getUserFeedData = async (userId) => {
+    const user = await User.findById(userId)
+      .select('interests skills location');
+    
+    // Get user connections from collaborations table
+    const collaborations = await scanItems(process.env.COLLABORATIONS_TABLE, {
+      FilterExpression: '(userId = :userId OR collaboratorId = :userId) AND #status = :status',
+      ExpressionAttributeNames: {
+        '#status': 'status'
+      },
+      ExpressionAttributeValues: {
+        ':userId': userId,
+        ':status': 'accepted'
+      }
+    });
+    
+    const connectedUserIds = collaborations.map(collab => 
+      collab.userId === userId ? collab.collaboratorId : collab.userId
+    );
+    
+    return { user, connectedUserIds };
+  };
+
+  const { user, connectedUserIds } = await getUserFeedData(userId);
+
   const feedItems = [];
   
   // Get Posts
   if (type === 'all' || type === 'posts') {
-    const posts = await Post.findAll({
-      where: {
-        isPublic: true,
-        createdAt: {
-          [Op.gte]: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // Last 30 days
-        }
-      },
-      include: [{
-        model: User,
-        as: 'author',
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage', 'isVerified']
-      }],
-      order: [['createdAt', 'DESC']],
-      limit: type === 'posts' ? limit * 2 : limit
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const posts = await scanItems(process.env.POSTS_TABLE, {
+      FilterExpression: 'isPublic = :isPublic AND createdAt >= :thirtyDaysAgo',
+      ExpressionAttributeValues: {
+        ':isPublic': true,
+        ':thirtyDaysAgo': thirtyDaysAgo
+      }
     });
     
-    posts.forEach(post => {
-      const score = calculateRelevanceScore(
-        post.toJSON(),
-        user.interests,
-        user.skills,
-        connectedUserIds
-      );
-      
-      feedItems.push({
-        ...post.toJSON(),
-        contentType: 'post',
-        relevanceScore: score,
-        isFromConnection: connectedUserIds.includes(post.authorId)
-      });
-    });
+    // Sort by creation date descending and limit
+    const sortedPosts = posts
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, type === 'posts' ? limit * 2 : limit);
+    
+    // Get author details for posts
+    for (const post of sortedPosts) {
+      try {
+        const author = await User.findById(post.authorId)
+          .select('firstName lastName username profileImage isVerified');
+        
+        const score = calculateRelevanceScore(
+          post,
+          user.interests,
+          user.skills,
+          connectedUserIds
+        );
+        
+        feedItems.push({
+          ...post,
+          author: author || { firstName: 'Unknown', lastName: 'User', username: 'unknown' },
+          contentType: 'post',
+          relevanceScore: score,
+          isFromConnection: connectedUserIds.includes(post.authorId)
+        });
+      } catch (error) {
+        console.error('Error fetching post author:', error);
+      }
+    }
   }
   
   // Get Projects
   if (type === 'all' || type === 'projects') {
-    const projects = await Project.findAll({
-      where: {
-        isPublic: true,
-        status: {
-          [Op.in]: ['planning', 'active', 'recruiting']
-        },
-        createdAt: {
-          [Op.gte]: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000) // Last 60 days
-        }
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+    const projects = await scanItems(process.env.PROJECTS_TABLE, {
+      FilterExpression: 'isPublic = :isPublic AND #status IN (:planning, :active, :recruiting) AND createdAt >= :sixtyDaysAgo',
+      ExpressionAttributeNames: {
+        '#status': 'status'
       },
-      include: [{
-        model: User,
-        as: 'owner',
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage']
-      }],
-      order: [['createdAt', 'DESC']],
-      limit: type === 'projects' ? limit * 2 : Math.floor(limit * 0.4)
+      ExpressionAttributeValues: {
+        ':isPublic': true,
+        ':planning': 'planning',
+        ':active': 'active',
+        ':recruiting': 'recruiting',
+        ':sixtyDaysAgo': sixtyDaysAgo
+      }
     });
     
-    projects.forEach(project => {
-      const score = calculateRelevanceScore(
-        project.toJSON(),
-        user.interests,
-        user.skills,
-        connectedUserIds
-      );
-      
-      feedItems.push({
-        ...project.toJSON(),
-        contentType: 'project',
-        relevanceScore: score,
-        isFromConnection: connectedUserIds.includes(project.ownerId)
-      });
-    });
+    // Sort by creation date descending and limit
+    const sortedProjects = projects
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, type === 'projects' ? limit * 2 : Math.floor(limit * 0.4));
+    
+    // Get owner details for projects
+    for (const project of sortedProjects) {
+      try {
+        const owner = await User.findById(project.ownerId)
+          .select('firstName lastName username profileImage');
+        
+        const score = calculateRelevanceScore(
+          project,
+          user.interests,
+          user.skills,
+          connectedUserIds
+        );
+        
+        feedItems.push({
+          ...project,
+          owner: owner || { firstName: 'Unknown', lastName: 'User', username: 'unknown' },
+          contentType: 'project',
+          relevanceScore: score,
+          isFromConnection: connectedUserIds.includes(project.ownerId)
+        });
+      } catch (error) {
+        console.error('Error fetching project owner:', error);
+      }
+    }
   }
   
   // Get Events
   if (type === 'all' || type === 'events') {
-    const events = await Event.findAll({
-      where: {
-        isPublic: true,
-        startDate: {
-          [Op.gte]: new Date()
-        },
-        endDate: {
-          [Op.gte]: new Date()
-        }
-      },
-      include: [{
-        model: User,
-        as: 'organizer',
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage']
-      }],
-      order: [['startDate', 'ASC']],
-      limit: type === 'events' ? limit * 2 : Math.floor(limit * 0.3)
+    const now = new Date().toISOString();
+    const events = await scanItems(process.env.EVENTS_TABLE, {
+      FilterExpression: 'isPublic = :isPublic AND startDate >= :now',
+      ExpressionAttributeValues: {
+        ':isPublic': true,
+        ':now': now
+      }
     });
     
-    events.forEach(event => {
-      const score = calculateRelevanceScore(
-        event.toJSON(),
-        user.interests,
-        user.skills,
-        connectedUserIds
-      );
-      
-      feedItems.push({
-        ...event.toJSON(),
-        contentType: 'event',
-        relevanceScore: score,
-        isFromConnection: connectedUserIds.includes(event.organizerId)
-      });
-    });
+    // Sort by start date ascending and limit
+    const sortedEvents = events
+      .sort((a, b) => new Date(a.startDate) - new Date(b.startDate))
+      .slice(0, type === 'events' ? limit * 2 : Math.floor(limit * 0.3));
+    
+    // Get organizer details for events
+    for (const event of sortedEvents) {
+      try {
+        const organizer = await User.findById(event.organizerId)
+          .select('firstName lastName username profileImage');
+        
+        const score = calculateRelevanceScore(
+          event,
+          user.interests,
+          user.skills,
+          connectedUserIds
+        );
+        
+        feedItems.push({
+          ...event,
+          organizer: organizer || { firstName: 'Unknown', lastName: 'User', username: 'unknown' },
+          contentType: 'event',
+          relevanceScore: score,
+          isFromConnection: connectedUserIds.includes(event.organizerId)
+        });
+      } catch (error) {
+        console.error('Error fetching event organizer:', error);
+      }
+    }
   }
   
   // Sort by relevance score and apply pagination
@@ -236,7 +264,8 @@ router.get('/', authenticateToken, feedValidation, async (req, res) => {
     } = req.query;
     
     // Check cache first
-    const cachedFeed = await cache.getCachedFeedResults(req.user.id, type, parseInt(page));
+    const cacheKey = `feed:${req.user.id}:${type}:${page}`;
+    const cachedFeed = await getCache(cacheKey);
     if (cachedFeed) {
       return res.json({
         ...cachedFeed,
@@ -261,8 +290,8 @@ router.get('/', authenticateToken, feedValidation, async (req, res) => {
       generatedAt: new Date().toISOString()
     };
 
-    // Cache the feed results
-    await cache.cacheFeedResults(req.user.id, type, parseInt(page), responseData);
+    // Cache the feed results for 10 minutes
+    await setCache(cacheKey, responseData, 600);
 
     res.json(responseData);
     

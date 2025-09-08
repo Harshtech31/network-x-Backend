@@ -1,4 +1,5 @@
 const express = require('express');
+const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
@@ -6,20 +7,12 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
-const { sequelize } = require('./src/models');
-const authRoutes = require('./src/routes/auth');
-const userRoutes = require('./src/routes/users');
-const eventRoutes = require('./src/routes/events');
-const postRoutes = require('./src/routes/posts');
-const clubRoutes = require('./src/routes/clubs');
-const projectRoutes = require('./src/routes/projects');
-const collaborationRoutes = require('./src/routes/collaborations');
-const messageRoutes = require('./src/routes/messages');
-const notificationRoutes = require('./src/routes/notifications');
-const searchRoutes = require('./src/routes/search');
-const feedRoutes = require('./src/routes/feed');
+const connectDB = require('./src/config/mongodb');
+const { connectRedis } = require('./src/config/redis');
+const { initializeSocket } = require('./src/config/socket');
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 
 // Security middleware
@@ -67,6 +60,8 @@ app.use('/api/messages', messageRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/feed', feedRoutes);
+app.use('/api/upload', uploadRoutes);
+app.use('/api/realtime', realtimeRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
@@ -104,18 +99,20 @@ app.use((err, req, res, next) => {
 // Database connection and server start
 const startServer = async () => {
   try {
-    await sequelize.authenticate();
-    console.log('✅ Database connection established successfully.');
+    // Connect to MongoDB
+    await connectDB();
     
-    if (process.env.NODE_ENV !== 'production') {
-      await sequelize.sync({ alter: true });
-      console.log('✅ Database synchronized successfully.');
-    }
+    // Connect to Redis
+    await connectRedis();
     
-    app.listen(PORT, () => {
+    // Initialize Socket.IO
+    initializeSocket(server);
+    
+    server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📊 Health check: http://localhost:${PORT}/health`);
       console.log(`🔗 API base URL: http://localhost:${PORT}/api`);
+      console.log(`⚡ Socket.IO enabled for real-time features`);
     });
   } catch (error) {
     console.error('❌ Unable to start server:', error);

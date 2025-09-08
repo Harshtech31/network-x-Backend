@@ -1,9 +1,9 @@
 const express = require('express');
-const { Op } = require('sequelize');
-const { User, Post, Project, Event, Club } = require('../models');
 const { authenticateToken } = require('../middleware/auth');
-const { body, query, validationResult } = require('express-validator');
-const cache = require('../utils/cache');
+const { query, validationResult } = require('express-validator');
+const { scanItems } = require('../config/dynamodb');
+const { setCache, getCache } = require('../config/redis');
+const User = require('../models/mongodb/User');
 
 const router = express.Router();
 
@@ -36,196 +36,181 @@ const performSearch = async (query, type, filters, page, limit, userId) => {
   const offset = (page - 1) * limit;
   const searchTerms = query.toLowerCase().split(' ').filter(term => term.length > 0);
   
-  // Build search conditions for different content types
-  const buildSearchConditions = (fields) => {
-    return {
-      [Op.or]: searchTerms.flatMap(term => 
-        fields.map(field => ({
-          [field]: {
-            [Op.iLike]: `%${term}%`
-          }
-        }))
-      )
-    };
-  };
-
   const results = {};
+  const POSTS_TABLE = process.env.DYNAMODB_POSTS_TABLE || 'networkx-posts';
+  const PROJECTS_TABLE = process.env.DYNAMODB_PROJECTS_TABLE || 'networkx-projects';
+  const CLUBS_TABLE = process.env.DYNAMODB_CLUBS_TABLE || 'networkx-clubs';
+  const EVENTS_TABLE = process.env.DYNAMODB_EVENTS_TABLE || 'networkx-events';
 
-  // Search Users
+  // Search Users (MongoDB)
   if (type === 'users' || type === 'all') {
-    const userConditions = {
-      [Op.and]: [
-        buildSearchConditions(['firstName', 'lastName', 'username', 'bio', 'department']),
-        { isActive: true },
-        filters.department ? { department: filters.department } : {},
-        filters.year ? { year: filters.year } : {},
-        filters.skills ? {
-          skills: {
-            [Op.overlap]: filters.skills
-          }
-        } : {}
+    const searchRegex = new RegExp(searchTerms.join('|'), 'i');
+    const userQuery = {
+      $and: [
+        {
+          $or: [
+            { firstName: searchRegex },
+            { lastName: searchRegex },
+            { username: searchRegex },
+            { bio: searchRegex },
+            { department: searchRegex }
+          ]
+        },
+        { isActive: { $ne: false } }
       ]
     };
 
-    const users = await User.findAndCountAll({
-      where: userConditions,
-      attributes: [
-        'id', 'firstName', 'lastName', 'username', 'bio', 
-        'profileImage', 'department', 'year', 'skills', 
-        'interests', 'rating', 'isVerified'
-      ],
-      limit: type === 'users' ? limit : Math.min(limit, 10),
-      offset: type === 'users' ? offset : 0,
-      order: [
-        ['rating', 'DESC'],
-        ['createdAt', 'DESC']
-      ]
-    });
+    if (filters.department) userQuery.$and.push({ department: filters.department });
+    if (filters.year) userQuery.$and.push({ year: filters.year });
+    if (filters.skills) userQuery.$and.push({ skills: { $in: filters.skills } });
+
+    const users = await User.find(userQuery)
+      .select('firstName lastName username bio profileImage department year skills interests rating isVerified')
+      .limit(type === 'users' ? limit : Math.min(limit, 10))
+      .skip(type === 'users' ? offset : 0)
+      .sort({ rating: -1, createdAt: -1 });
+
+    const totalUsers = await User.countDocuments(userQuery);
 
     results.users = {
-      data: users.rows,
-      total: users.count,
-      hasMore: users.count > (offset + users.rows.length)
+      data: users,
+      total: totalUsers,
+      hasMore: totalUsers > (offset + users.length)
     };
   }
 
-  // Search Posts
+  // Search Posts (DynamoDB)
   if (type === 'posts' || type === 'all') {
-    const postConditions = {
-      [Op.and]: [
-        buildSearchConditions(['title', 'content']),
-        { isPublic: true },
-        filters.postType ? { type: filters.postType } : {},
-        filters.tags ? {
-          tags: {
-            [Op.overlap]: filters.tags
-          }
-        } : {}
-      ]
-    };
+    try {
+      const posts = await scanItems(POSTS_TABLE, null, {}, type === 'posts' ? limit : Math.min(limit, 10));
+      
+      // Filter posts based on search terms
+      const filteredPosts = posts.filter(post => {
+        const matchesSearch = searchTerms.some(term => 
+          (post.title && post.title.toLowerCase().includes(term)) ||
+          (post.content && post.content.toLowerCase().includes(term))
+        );
+        const matchesFilters = (!filters.postType || post.type === filters.postType) &&
+                              (!filters.tags || (post.tags && post.tags.some(tag => filters.tags.includes(tag))));
+        return matchesSearch && matchesFilters && post.isPublic !== false;
+      });
 
-    const posts = await Post.findAndCountAll({
-      where: postConditions,
-      include: [{
-        model: User,
-        as: 'author',
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage', 'isVerified']
-      }],
-      limit: type === 'posts' ? limit : Math.min(limit, 10),
-      offset: type === 'posts' ? offset : 0,
-      order: [
-        ['isPinned', 'DESC'],
-        ['likes', 'DESC'],
-        ['createdAt', 'DESC']
-      ]
-    });
+      // Get user details for posts
+      const postsWithUsers = await Promise.all(
+        filteredPosts.slice(0, type === 'posts' ? limit : Math.min(limit, 10)).map(async (post) => {
+          const author = await User.findById(post.userId).select('firstName lastName username profileImage isVerified');
+          return { ...post, author };
+        })
+      );
 
-    results.posts = {
-      data: posts.rows,
-      total: posts.count,
-      hasMore: posts.count > (offset + posts.rows.length)
-    };
+      results.posts = {
+        data: postsWithUsers,
+        total: filteredPosts.length,
+        hasMore: filteredPosts.length > postsWithUsers.length
+      };
+    } catch (error) {
+      console.error('Posts search error:', error);
+      results.posts = { data: [], total: 0, hasMore: false };
+    }
   }
 
-  // Search Projects
+  // Search Projects (DynamoDB)
   if (type === 'projects' || type === 'all') {
-    const projectConditions = {
-      [Op.and]: [
-        buildSearchConditions(['title', 'description']),
-        { isPublic: true },
-        filters.status ? { status: filters.status } : {},
-        filters.techStack ? {
-          techStack: {
-            [Op.overlap]: filters.techStack
-          }
-        } : {}
-      ]
-    };
+    try {
+      const projects = await scanItems(PROJECTS_TABLE, null, {}, type === 'projects' ? limit : Math.min(limit, 5));
+      
+      const filteredProjects = projects.filter(project => {
+        const matchesSearch = searchTerms.some(term => 
+          (project.title && project.title.toLowerCase().includes(term)) ||
+          (project.description && project.description.toLowerCase().includes(term))
+        );
+        const matchesFilters = (!filters.status || project.status === filters.status) &&
+                              (!filters.techStack || (project.techStack && project.techStack.some(tech => filters.techStack.includes(tech))));
+        return matchesSearch && matchesFilters && project.isPublic !== false;
+      });
 
-    const projects = await Project.findAndCountAll({
-      where: projectConditions,
-      include: [{
-        model: User,
-        as: 'owner',
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage']
-      }],
-      limit: type === 'projects' ? limit : Math.min(limit, 5),
-      offset: type === 'projects' ? offset : 0,
-      order: [
-        ['priority', 'DESC'],
-        ['createdAt', 'DESC']
-      ]
-    });
+      const projectsWithUsers = await Promise.all(
+        filteredProjects.slice(0, type === 'projects' ? limit : Math.min(limit, 5)).map(async (project) => {
+          const owner = await User.findById(project.ownerId).select('firstName lastName username profileImage');
+          return { ...project, owner };
+        })
+      );
 
-    results.projects = {
-      data: projects.rows,
-      total: projects.count,
-      hasMore: projects.count > (offset + projects.rows.length)
-    };
+      results.projects = {
+        data: projectsWithUsers,
+        total: filteredProjects.length,
+        hasMore: filteredProjects.length > projectsWithUsers.length
+      };
+    } catch (error) {
+      console.error('Projects search error:', error);
+      results.projects = { data: [], total: 0, hasMore: false };
+    }
   }
 
-  // Search Events
+  // Search Events (DynamoDB)
   if (type === 'events' || type === 'all') {
-    const eventConditions = {
-      [Op.and]: [
-        buildSearchConditions(['title', 'description', 'location']),
-        { isPublic: true },
-        { startDate: { [Op.gte]: new Date() } }, // Only future events
-        filters.category ? { category: filters.category } : {}
-      ]
-    };
+    try {
+      const events = await scanItems(EVENTS_TABLE, null, {}, type === 'events' ? limit : Math.min(limit, 5));
+      
+      const filteredEvents = events.filter(event => {
+        const matchesSearch = searchTerms.some(term => 
+          (event.title && event.title.toLowerCase().includes(term)) ||
+          (event.description && event.description.toLowerCase().includes(term)) ||
+          (event.location && event.location.toLowerCase().includes(term))
+        );
+        const matchesFilters = (!filters.category || event.category === filters.category);
+        const isFuture = new Date(event.startDate) >= new Date();
+        return matchesSearch && matchesFilters && event.isPublic !== false && isFuture;
+      });
 
-    const events = await Event.findAndCountAll({
-      where: eventConditions,
-      include: [{
-        model: User,
-        as: 'organizer',
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage']
-      }],
-      limit: type === 'events' ? limit : Math.min(limit, 5),
-      offset: type === 'events' ? offset : 0,
-      order: [
-        ['startDate', 'ASC']
-      ]
-    });
+      const eventsWithUsers = await Promise.all(
+        filteredEvents.slice(0, type === 'events' ? limit : Math.min(limit, 5)).map(async (event) => {
+          const organizer = await User.findById(event.organizerId).select('firstName lastName username profileImage');
+          return { ...event, organizer };
+        })
+      );
 
-    results.events = {
-      data: events.rows,
-      total: events.count,
-      hasMore: events.count > (offset + events.rows.length)
-    };
+      results.events = {
+        data: eventsWithUsers,
+        total: filteredEvents.length,
+        hasMore: filteredEvents.length > eventsWithUsers.length
+      };
+    } catch (error) {
+      console.error('Events search error:', error);
+      results.events = { data: [], total: 0, hasMore: false };
+    }
   }
 
-  // Search Clubs
+  // Search Clubs (DynamoDB)
   if (type === 'clubs' || type === 'all') {
-    const clubConditions = {
-      [Op.and]: [
-        buildSearchConditions(['name', 'description']),
-        { isActive: true },
-        filters.category ? { category: filters.category } : {}
-      ]
-    };
+    try {
+      const clubs = await scanItems(CLUBS_TABLE, null, {}, type === 'clubs' ? limit : Math.min(limit, 5));
+      
+      const filteredClubs = clubs.filter(club => {
+        const matchesSearch = searchTerms.some(term => 
+          (club.name && club.name.toLowerCase().includes(term)) ||
+          (club.description && club.description.toLowerCase().includes(term))
+        );
+        const matchesFilters = (!filters.category || club.category === filters.category);
+        return matchesSearch && matchesFilters && club.isActive !== false;
+      });
 
-    const clubs = await Club.findAndCountAll({
-      where: clubConditions,
-      include: [{
-        model: User,
-        as: 'president',
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage']
-      }],
-      limit: type === 'clubs' ? limit : Math.min(limit, 5),
-      offset: type === 'clubs' ? offset : 0,
-      order: [
-        ['memberCount', 'DESC'],
-        ['createdAt', 'DESC']
-      ]
-    });
+      const clubsWithUsers = await Promise.all(
+        filteredClubs.slice(0, type === 'clubs' ? limit : Math.min(limit, 5)).map(async (club) => {
+          const president = await User.findById(club.presidentId).select('firstName lastName username profileImage');
+          return { ...club, president };
+        })
+      );
 
-    results.clubs = {
-      data: clubs.rows,
-      total: clubs.count,
-      hasMore: clubs.count > (offset + clubs.rows.length)
-    };
+      results.clubs = {
+        data: clubsWithUsers,
+        total: filteredClubs.length,
+        hasMore: filteredClubs.length > clubsWithUsers.length
+      };
+    } catch (error) {
+      console.error('Clubs search error:', error);
+      results.clubs = { data: [], total: 0, hasMore: false };
+    }
   }
 
   return results;
@@ -259,12 +244,12 @@ router.get('/', authenticateToken, searchValidation, async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     
     // Check cache first
-    const cachedResults = await cache.getCachedSearchResults(q, type, parsedFilters, parseInt(page));
+    const cacheKey = `search:${q}:${type}:${JSON.stringify(parsedFilters)}:${page}`;
+    const cachedResults = await getCache(cacheKey);
     if (cachedResults) {
       return res.json({
         ...cachedResults,
-        cached: true,
-        searchTime: Date.now() - req.startTime
+        cached: true
       });
     }
 
@@ -293,12 +278,11 @@ router.get('/', authenticateToken, searchValidation, async (req, res) => {
       page: parseInt(page),
       limit: parseInt(limit),
       totalResults,
-      results,
-      searchTime: Date.now() - req.startTime
+      results
     };
 
-    // Cache the results
-    await cache.cacheSearchResults(q, type, parsedFilters, parseInt(page), responseData);
+    // Cache the results for 5 minutes
+    await setCache(cacheKey, responseData, 300);
 
     res.json(responseData);
 
@@ -324,22 +308,21 @@ router.get('/suggestions', authenticateToken, async (req, res) => {
 
     // Get user suggestions
     if (type === 'users' || type === 'all') {
-      const users = await User.findAll({
-        where: {
-          [Op.or]: [
-            { firstName: { [Op.iLike]: `${q}%` } },
-            { lastName: { [Op.iLike]: `${q}%` } },
-            { username: { [Op.iLike]: `${q}%` } }
-          ],
-          isActive: true
-        },
-        attributes: ['id', 'firstName', 'lastName', 'username', 'profileImage'],
-        limit: Math.min(limit, 5)
-      });
+      const searchRegex = new RegExp(`^${q}`, 'i');
+      const users = await User.find({
+        $or: [
+          { firstName: searchRegex },
+          { lastName: searchRegex },
+          { username: searchRegex }
+        ],
+        isActive: { $ne: false }
+      })
+      .select('firstName lastName username profileImage')
+      .limit(Math.min(limit, 5));
 
       suggestions.push(...users.map(user => ({
         type: 'user',
-        id: user.id,
+        id: user._id,
         text: `${user.firstName} ${user.lastName}`,
         subtitle: `@${user.username}`,
         image: user.profileImage
