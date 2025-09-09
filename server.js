@@ -48,6 +48,25 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Import route modules
+const authRoutes = require('./src/routes/auth');
+const userRoutes = require('./src/routes/users');
+const postRoutes = require('./src/routes/posts');
+const projectRoutes = require('./src/routes/projects');
+const clubRoutes = require('./src/routes/clubs');
+const eventRoutes = require('./src/routes/events');
+const messageRoutes = require('./src/routes/messages');
+const notificationRoutes = require('./src/routes/notifications');
+const collaborationRoutes = require('./src/routes/collaborations');
+const feedRoutes = require('./src/routes/feed');
+const searchRoutes = require('./src/routes/search');
+const uploadRoutes = require('./src/routes/upload');
+const keyRoutes = require('./src/routes/keys');
+const reportRoutes = require('./src/routes/reports');
+const bookmarkRoutes = require('./src/routes/bookmarks');
+const emailRoutes = require('./src/routes/email');
+const lambdaRoutes = require('./src/routes/lambda');
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -62,6 +81,12 @@ app.use('/api/search', searchRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/realtime', realtimeRoutes);
+app.use('/api/keys', keyRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/bookmarks', bookmarkRoutes);
+app.use('/api/email', emailRoutes);
+app.use('/api/push', require('./src/routes/push'));
+app.use('/api/lambda', lambdaRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

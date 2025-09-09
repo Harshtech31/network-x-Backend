@@ -1,5 +1,6 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
 const { putItem, getItem, updateItem, deleteItem, queryItems, scanItems } = require('../config/dynamodb');
 const { setCache, getCache, deleteCache, CACHE_KEYS } = require('../config/redis');
@@ -354,6 +355,126 @@ const createNotification = async ({
     throw error;
   }
 };
+
+// POST /api/notifications/register-token - Register push notification token
+router.post('/register-token', authenticateToken, [
+  body('token').notEmpty().withMessage('Push token is required'),
+  body('platform').isIn(['ios', 'android', 'web']).withMessage('Platform must be ios, android, or web')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        details: errors.array()
+      });
+    }
+
+    const { token, platform } = req.body;
+    const userId = req.user.id;
+
+    // Update user's push token in MongoDB
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.pushTokens = user.pushTokens || [];
+    
+    // Remove existing token for this platform
+    user.pushTokens = user.pushTokens.filter(t => t.platform !== platform);
+    
+    // Add new token
+    user.pushTokens.push({
+      token,
+      platform,
+      registeredAt: new Date()
+    });
+
+    await user.save();
+
+    res.json({
+      message: 'Push token registered successfully',
+      platform,
+      registeredAt: new Date()
+    });
+  } catch (error) {
+    console.error('Register push token error:', error);
+    res.status(500).json({ error: 'Failed to register push token' });
+  }
+});
+
+// PUT /api/notifications/settings - Update notification preferences
+router.put('/settings', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { 
+      pushEnabled = true,
+      emailEnabled = true,
+      messageNotifications = true,
+      postNotifications = true,
+      projectNotifications = true,
+      clubNotifications = true,
+      eventNotifications = true,
+      followNotifications = true
+    } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.notificationSettings = {
+      pushEnabled,
+      emailEnabled,
+      messageNotifications,
+      postNotifications,
+      projectNotifications,
+      clubNotifications,
+      eventNotifications,
+      followNotifications,
+      updatedAt: new Date()
+    };
+
+    await user.save();
+
+    res.json({
+      message: 'Notification settings updated successfully',
+      settings: user.notificationSettings
+    });
+  } catch (error) {
+    console.error('Update notification settings error:', error);
+    res.status(500).json({ error: 'Failed to update notification settings' });
+  }
+});
+
+// GET /api/notifications/settings - Get notification preferences
+router.get('/settings', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('notificationSettings');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const defaultSettings = {
+      pushEnabled: true,
+      emailEnabled: true,
+      messageNotifications: true,
+      postNotifications: true,
+      projectNotifications: true,
+      clubNotifications: true,
+      eventNotifications: true,
+      followNotifications: true
+    };
+
+    res.json({
+      settings: user.notificationSettings || defaultSettings
+    });
+  } catch (error) {
+    console.error('Get notification settings error:', error);
+    res.status(500).json({ error: 'Failed to get notification settings' });
+  }
+});
 
 module.exports = { router, createNotification };
 module.exports.router = router;
