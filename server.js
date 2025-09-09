@@ -66,6 +66,10 @@ const reportRoutes = require('./src/routes/reports');
 const bookmarkRoutes = require('./src/routes/bookmarks');
 const emailRoutes = require('./src/routes/email');
 const lambdaRoutes = require('./src/routes/lambda');
+const realtimeRoutes = require('./src/routes/realtime');
+const adminRoutes = require('./src/routes/admin');
+const analyticsRoutes = require('./src/routes/analytics');
+const healthRoutes = require('./src/routes/health');
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -87,6 +91,9 @@ app.use('/api/bookmarks', bookmarkRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/push', require('./src/routes/push'));
 app.use('/api/lambda', lambdaRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/health', healthRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
