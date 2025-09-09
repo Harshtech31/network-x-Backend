@@ -1,8 +1,8 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
-const { putItem, getItem, scanItems, updateItem, deleteItem } = require('../config/dynamodb');
-const { setCache, getCache, deleteCache } = require('../config/redis');
+const { putItem, getItem, scanItems, updateItem, deleteItem, queryItems } = require('../config/dynamodb');
+const { setCache, getCache, deleteCache, CACHE_KEYS } = require('../config/redis');
 const User = require('../models/mongodb/User');
 const Conversation = require('../models/mongodb/Conversation');
 const UserKeys = require('../models/mongodb/UserKeys');
@@ -349,6 +349,7 @@ router.post('/send', authenticateToken, [
 });
 
 // POST /api/messages - Send a new message
+const { uploadMiddleware } = require('../config/aws');
 router.post('/', authenticateToken, uploadMiddleware.messageMedia, async (req, res) => {
   try {
     const { receiverId, content, conversationId } = req.body;

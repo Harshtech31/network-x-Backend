@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const userSchema = new mongoose.Schema({
   email: {
@@ -137,6 +138,35 @@ const userSchema = new mongoose.Schema({
     github: { type: String, default: null },
     twitter: { type: String, default: null },
     portfolio: { type: String, default: null }
+  },
+  // Social features
+  followers: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  following: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  // Role-based access control
+  role: {
+    type: String,
+    enum: ['user', 'admin', 'moderator'],
+    default: 'user'
+  },
+  // Additional user preferences
+  preferences: {
+    notifications: {
+      email: { type: Boolean, default: true },
+      push: { type: Boolean, default: true },
+      inApp: { type: Boolean, default: true }
+    },
+    privacy: {
+      profileVisibility: { type: String, enum: ['public', 'private', 'friends'], default: 'public' },
+      showEmail: { type: Boolean, default: false },
+      showLocation: { type: Boolean, default: true }
+    },
+    theme: { type: String, enum: ['light', 'dark', 'auto'], default: 'auto' }
   }
 }, {
   timestamps: true,
@@ -159,7 +189,17 @@ userSchema.index({ department: 1 });
 userSchema.index({ year: 1 });
 userSchema.index({ availability: 1 });
 userSchema.index({ isActive: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ followers: 1 });
+userSchema.index({ following: 1 });
+userSchema.index({ createdAt: -1 });
+userSchema.index({ lastSeen: -1 });
+userSchema.index({ rating: -1 });
 userSchema.index({ firstName: 'text', lastName: 'text', username: 'text', bio: 'text' });
+// Compound indexes for complex queries
+userSchema.index({ department: 1, year: 1 });
+userSchema.index({ isActive: 1, role: 1 });
+userSchema.index({ department: 1, skills: 1 });
 
 // Enhanced password hashing with salting and multi-hashing
 userSchema.pre('save', async function(next) {

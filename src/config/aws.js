@@ -118,7 +118,13 @@ const uploadMiddleware = {
   postMedia: upload.array('media', 5),
   
   // Project files upload
-  projectFiles: upload.array('files', 10)
+  projectFiles: upload.array('files', 10),
+
+  // Additional named helpers used by routes
+  projectMedia: upload.array('media', 5),
+  clubMedia: upload.array('media', 5),
+  eventMedia: upload.array('media', 5),
+  messageMedia: upload.array('media', 5)
 };
 
 module.exports = {
