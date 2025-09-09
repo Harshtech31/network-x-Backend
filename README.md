@@ -214,18 +214,12 @@ GET /api/realtime/health
 4. Push to branch (`git push origin feature/AmazingFeature`)
 5. Open Pull Request
 
-## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🔗 Related Projects
 
 - [Network-X Frontend](https://github.com/Harshtech31/Network-x-NoDevBuild) - React Native mobile app
 
-## 📞 Support
 
-For support, email support@networkx.com or create an issue in this repository.
-
----
 
 **Built with ❤️ by the Network-X Team**
